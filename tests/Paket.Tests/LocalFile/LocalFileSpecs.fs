@@ -81,3 +81,21 @@ let ``should ignore comments``() =
         overrides |> shouldHaveLength 2
     | Bad msgs ->
         Assert.Fail (msgs |> String.concat System.Environment.NewLine)
+
+[<Test>]
+let ``should parse single git git override``() = 
+    let contents = """
+        git fake -> git file:\\\c:/github/FAKE fature_branch
+        """
+    let expected = 
+        LocalFile [
+            GitGitOverride
+                (LocalFile.nameGroupGit ("fake", "main"), 
+                 """file:\\\c:/github/FAKE fature_branch"""
+                 ) 
+        ]
+        |> Trial.ok
+
+    let actual = LocalFile.parse (toLines contents |> Array.toList)
+
+    actual |> shouldEqual expected

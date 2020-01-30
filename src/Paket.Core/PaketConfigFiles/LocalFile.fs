@@ -9,9 +9,15 @@ type OverriddenPackage = {
     Group : GroupName 
 }
 
+type OverriddenGit = {
+    Project : string
+    Group : GroupName 
+}
+
 type LocalOverride =
     | LocalSourceOverride of package: OverriddenPackage * devSource: PackageSource * version: Option<SemVerInfo>
     | LocalGitOverride    of package: OverriddenPackage * gitSource: string
+    | GitGitOverride      of git: OverriddenGit * gitSource: string
 
 type LocalFile = LocalFile of devSourceOverrides: LocalOverride list
 
@@ -37,6 +43,15 @@ module LocalFile =
         { Name = PackageName name
           Group = group }
 
+    let nameGroupGit (project, group) = 
+        let group = 
+            if group = "" then 
+                Constants.MainDependencyGroup 
+            else 
+                GroupName group
+        { Project = project
+          Group = group }
+
     let private parseLine = function
         | Regex 
             "^nuget[ ]+(.*?)([ ]+group[ ]+(.*))?[ ]+->[ ]+(source[ ]+.*?)([ ]+version[ ]+(.*))?$" 
@@ -58,6 +73,11 @@ module LocalFile =
             "nuget[ ]+(.*?)([ ]+group[ ]+(.*))?[ ]+->[ ]+git[ ]+(.*)"
             [package; _; group; gitSource] ->
             LocalGitOverride (nameGroup(package, group), gitSource)
+            |> Trial.ok
+        | Regex 
+            "git[ ]+(.*?)([ ]+group[ ]+(.*))?[ ]+->[ ]+git[ ]+(.*)"
+            [project; _; group; gitSource] ->
+            GitGitOverride (nameGroupGit(project, group), gitSource)
             |> Trial.ok
         | line ->
             Trial.fail (sprintf "Cannot parse line '%s'" line)
@@ -88,6 +108,9 @@ module LocalFile =
             else
                 original)
 
+    let private overrideRemoteSource (project, source) (resolvedSourceFile : ResolvedSourceFile) = 
+        if resolvedSourceFile.Project = project then source else resolvedSourceFile
+
     let private warning x =
         match x with
         | LocalSourceOverride ({ Name = p; Group = g},s, Some v) ->
@@ -96,6 +119,8 @@ module LocalFile =
             sprintf "nuget %s group %s -> %s" (p.ToString()) (g.ToString()) (s.ToString())
         | LocalGitOverride   ({ Name = p; Group = g},s) ->
             sprintf "nuget %s group %s -> %s" (p.ToString()) (g.ToString()) s
+        | GitGitOverride ({Project = p; Group = g}, s) ->
+            sprintf "git %s group %s -> %s" (p.ToString()) (g.ToString()) s
         |> (+) "paket.local override: "
         |> Logging.traceWarn
         x
@@ -152,6 +177,35 @@ module LocalFile =
                     else
                         g)
             LockFile(lockFile.FileName, groups)
+        | GitGitOverride ({Project = oldProject; Group = group}, s) ->
+            let owner,branch,project,cloneUrl,buildCommand,operatingSystemRestriction,packagePath = 
+                Git.Handling.extractUrlParts s
+            let restriction = VersionRestriction.Concrete (defaultArg branch "master")
+            let sha = 
+                RemoteDownload.getSHA1OfBranch (GitLink cloneUrl) owner project restriction None 
+                |> Async.RunSynchronously
+
+            let remoteFile = { 
+                ResolvedSourceFile.Commit = sha
+                Owner = owner
+                Origin = GitLink cloneUrl
+                Project = project
+                Dependencies = Set.empty
+                Command = buildCommand
+                OperatingSystemRestriction = operatingSystemRestriction
+                PackagePath = packagePath
+                Name = "" 
+                AuthKey = None 
+            }
+            let groups =
+                lockFile.Groups
+                |> Map.map (fun name g -> 
+                    if name = group then
+                        { g with RemoteFiles = g.RemoteFiles |> List.map (overrideRemoteSource (oldProject, remoteFile)) } 
+                    else
+                        g)
+            LockFile(lockFile.FileName, groups)
+
             
     let overrideLockFile (LocalFile overrides) lockFile =
         List.fold overrideDependency lockFile overrides
@@ -160,4 +214,5 @@ module LocalFile =
         xs 
         |> List.exists (function | LocalSourceOverride ({ Name = p; Group = g}, _, _)
                                  | LocalGitOverride    ({ Name = p; Group = g}, _) 
-                                   -> p = package && g = group)
+                                   -> p = package && g = group
+                                 | GitGitOverride _ -> false)
